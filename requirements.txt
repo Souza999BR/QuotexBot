@@ -7,3 +7,5 @@ certifi==2024.8.30
 urllib3==2.2.3
 beautifulsoup4==4.12.3
 websocket-client==1.8.0
+numpy==1.26.4
+
