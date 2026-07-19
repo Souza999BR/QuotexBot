@@ -1,8 +1,22 @@
+# Telegram bot (sem extra http2 para evitar compilação de h2 no Discloud)
 python-telegram-bot==21.6
+
+# Variáveis de ambiente
 python-dotenv==1.0.1
+
+# Criptografia dos dados sensíveis em disco
 cryptography==43.0.3
+
+# HTTP / requests (usados pelo pyquotex internamente)
 requests==2.32.3
 certifi==2024.8.30
 urllib3==2.2.3
+
+# Parser HTML (pyquotex/http/navigator.py)
 beautifulsoup4==4.12.3
+
+# WebSocket (pyquotex comunicação em tempo real)
 websocket-client==1.8.0
+
+# NOTA: playwright foi REMOVIDO — requer binários de browser não disponíveis
+#       no ambiente Discloud. O login do pyquotex usa HTTP + WebSocket direto.

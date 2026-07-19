@@ -381,7 +381,7 @@ async def _conectar_com_pin(uid: str, client: Quotex, chat_id: int) -> bool:
             await enviar_telegram(
                 chat_id,
                 f"❌ Login falhou: {exc.message}\n"
-                "Verifique e-mail/senha em /ajustaconfig ou remove a autenticação pelo PIN  e tente novamente /iniciar.",
+                "Verifique e-mail/senha em /ajustaconfig ou desativa a autenticação de dois fatores de login no quotex e tente novamente /iniciar.",
             )
             return False
 
