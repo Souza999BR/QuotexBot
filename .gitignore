@@ -1,0 +1,11 @@
+.env
+session.json
+users_data.json
+cadastrados.json
+licencas.json
+estado_diario.json
+auditoria.log
+settings/config.ini
+__pycache__/
+*.pyc
+.venv/
