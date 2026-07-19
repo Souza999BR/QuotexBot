@@ -1,18 +1,14 @@
 """Login e loop de operações por usuário do Telegram.
 
 Modos de operação:
-  /iniciar  → loop manual, roda até o usuário chamar /parar
+  /iniciar    → loop manual, roda até o usuário chamar /parar
   /automatico → scheduler que inicia o loop todo dia útil 08:00-10:30
-  /parar    → para ambos os modos
+  /parar      → para ambos os modos
 
 Fluxo de PIN:
   1. connect() lança PinRequiredError → bot avisa o usuário com /pin
   2. /pin XXXXXX → submeter_pin(user_id, codigo) define client.pin_code
   3. O asyncio.Event é destravado → connect() é refeita com o PIN
-
-Isolamento de sessão:
-  Cada usuário tem seu próprio diretório sessions/<user_id>/ para que
-  session.json não seja compartilhado entre contas.
 
 Assinaturas que bot.py espera:
     async iniciar_estrategia_com_pin(user_id) -> str
@@ -24,6 +20,7 @@ Assinaturas que bot.py espera:
     MODO_AUTO: dict[str, bool]
     enviar_telegram(chat_id, texto) -> coroutine
 """
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -381,7 +378,7 @@ async def _conectar_com_pin(uid: str, client: Quotex, chat_id: int) -> bool:
             await enviar_telegram(
                 chat_id,
                 f"❌ Login falhou: {exc.message}\n"
-                "Verifique e-mail/senha em /ajustaconfig ou desativa a autenticação de dois fatores de login no quotex e tente novamente /iniciar.",
+                "Verifique e-mail/senha em /ajustaconfig e tente novamente.",
             )
             return False
 

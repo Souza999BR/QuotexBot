@@ -10,6 +10,8 @@ IMPORTANTE — assinaturas públicas que bot.py espera:
     USERS_DATA: dict[str, dict]
     CADASTRADOS: list[int]
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
