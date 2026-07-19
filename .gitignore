@@ -1,4 +1,4 @@
-.env
+# .env NÃO está aqui — precisa ser enviado ao Discloud junto com o código
 session.json
 users_data.json
 cadastrados.json

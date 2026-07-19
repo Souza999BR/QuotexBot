@@ -9,9 +9,13 @@ Copy `.env.example` to `.env` and fill in your own values before running.
 """
 import os
 import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Carrega o .env do mesmo diretório deste arquivo (funciona
+# independentemente do diretório de trabalho — inclusive no Discloud).
+_env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=_env_path)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
