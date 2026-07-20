@@ -1,6 +1,7 @@
 # === bot.py ===
 import logging
 import threading
+import asyncio
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -628,6 +629,10 @@ def iniciar_bot():
 
     while True:
         try:
+            # Python 3.10+ não cria event loop automaticamente;
+            # criamos um explicitamente a cada iteração para garantir
+            # compatibilidade com Python 3.14 e a PTB 21.x.
+            asyncio.set_event_loop(asyncio.new_event_loop())
             logger.info("🤖 Iniciando bot Telegram...")
             app = (
                 ApplicationBuilder()
