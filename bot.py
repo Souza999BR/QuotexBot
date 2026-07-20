@@ -624,95 +624,119 @@ async def _pos_inicializacao(application):
 
 
 # === Inicialização ===
-def iniciar_bot():
-    validar_configuracao()
+def _build_app():
+    """Constrói e configura a Application do PTB."""
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .request(HTTPXRequest())
+        .post_init(_pos_inicializacao)
+        .build()
+    )
 
+    senha_conv = ConversationHandler(
+        entry_points=[CommandHandler("senha", senha)],
+        states={VALIDAR_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, validar_senha)]},
+        fallbacks=[CommandHandler("cancel", cancelar)],
+    )
+
+    config_conv = ConversationHandler(
+        entry_points=[CommandHandler("config", config_start)],
+        states={
+            EMAIL_QUOTEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_email)],
+            SENHA_QUOTEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_senha)],
+            LOGIN_AUTOMATICO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_login_automatico)],
+            EMAIL_IMAP: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_email_imap)],
+            SENHA_IMAP: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_senha_imap)],
+            VALOR_ENTRADA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_valor)],
+            TIPO_CONTA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_tipo)],
+            TEMPO_EXPIRACAO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_tempo)],
+            SIMBOLO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_simbolo)],
+            STOP_WIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_stop_win)],
+            STOP_LOSS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_stop_loss)],
+            USAR_MARTINGALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_martingale)],
+            FATOR_MARTINGALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_fator)],
+            CONFIRMAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_config)],
+        },
+        fallbacks=[CommandHandler("cancel", cancelar)],
+    )
+
+    ajusta_conv = ConversationHandler(
+        entry_points=[CommandHandler("ajustaconfig", ajusta_config)],
+        states={
+            AJUSTAR_CAMPO: [CallbackQueryHandler(escolher_campo_callback)],
+            NOVO_VALOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_novo_valor)],
+        },
+        fallbacks=[CommandHandler("cancel", cancelar)],
+    )
+
+    admin_novo_usuario_conv = ConversationHandler(
+        entry_points=[CommandHandler("addusuario", admin_novo_usuario)],
+        states={
+            NOVO_USUARIO_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receber_novo_usuario)],
+        },
+        fallbacks=[CommandHandler("cancel", cancelar)],
+    )
+
+    app.add_handler(senha_conv)
+    app.add_handler(config_conv)
+    app.add_handler(ajusta_conv)
+    app.add_handler(admin_novo_usuario_conv)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cadastro", cadastro))
+    app.add_handler(CommandHandler("iniciar", iniciar))
+    app.add_handler(CommandHandler("automatico", automatico))
+    app.add_handler(CommandHandler("pin", receber_pin))
+    app.add_handler(CommandHandler("parar", parar))
+    app.add_handler(CommandHandler("meusdados", meusdados))
+    app.add_handler(CommandHandler("historico", historico_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("senhas", admin_senhas))
+    app.add_handler(CommandHandler("revogar", admin_revogar))
+    app.add_error_handler(handle_error)
+
+    return app
+
+
+async def _async_main():
+    """Corrotina principal — compatível com Python 3.12+ / 3.14.
+
+    Usa a API async do PTB (async with app) em vez de run_polling(),
+    pois run_polling() chama asyncio.get_event_loop() que no Python 3.14
+    lança RuntimeError quando não há loop em execução.
+
+    O loop de retry fica aqui (async) para poder usar await asyncio.sleep()
+    sem bloquear a thread.
+    """
     while True:
         try:
-            # Python 3.10+ não cria event loop automaticamente;
-            # criamos um explicitamente a cada iteração para garantir
-            # compatibilidade com Python 3.14 e a PTB 21.x.
-            asyncio.set_event_loop(asyncio.new_event_loop())
             logger.info("🤖 Iniciando bot Telegram...")
-            app = (
-                ApplicationBuilder()
-                .token(TELEGRAM_BOT_TOKEN)
-                .request(HTTPXRequest())
-                .post_init(_pos_inicializacao)
-                .build()
-            )
-
-            senha_conv = ConversationHandler(
-                entry_points=[CommandHandler("senha", senha)],
-                states={VALIDAR_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, validar_senha)]},
-                fallbacks=[CommandHandler("cancel", cancelar)],
-            )
-
-            config_conv = ConversationHandler(
-                entry_points=[CommandHandler("config", config_start)],
-                states={
-                    EMAIL_QUOTEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_email)],
-                    SENHA_QUOTEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_senha)],
-                    LOGIN_AUTOMATICO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_login_automatico)],
-                    EMAIL_IMAP: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_email_imap)],
-                    SENHA_IMAP: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_senha_imap)],
-                    VALOR_ENTRADA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_valor)],
-                    TIPO_CONTA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_tipo)],
-                    TEMPO_EXPIRACAO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_tempo)],
-                    SIMBOLO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_simbolo)],
-                    STOP_WIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_stop_win)],
-                    STOP_LOSS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_stop_loss)],
-                    USAR_MARTINGALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_martingale)],
-                    FATOR_MARTINGALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_fator)],
-                    CONFIRMAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_config)],
-                },
-                fallbacks=[CommandHandler("cancel", cancelar)],
-            )
-
-            ajusta_conv = ConversationHandler(
-                entry_points=[CommandHandler("ajustaconfig", ajusta_config)],
-                states={
-                    AJUSTAR_CAMPO: [CallbackQueryHandler(escolher_campo_callback)],
-                    NOVO_VALOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_novo_valor)],
-                },
-                fallbacks=[CommandHandler("cancel", cancelar)],
-            )
-
-            admin_novo_usuario_conv = ConversationHandler(
-                entry_points=[CommandHandler("addusuario", admin_novo_usuario)],
-                states={
-                    NOVO_USUARIO_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receber_novo_usuario)],
-                },
-                fallbacks=[CommandHandler("cancel", cancelar)],
-            )
-
-            app.add_handler(senha_conv)
-            app.add_handler(config_conv)
-            app.add_handler(ajusta_conv)
-            app.add_handler(admin_novo_usuario_conv)
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("cadastro", cadastro))
-            app.add_handler(CommandHandler("iniciar", iniciar))
-            app.add_handler(CommandHandler("automatico", automatico))
-            app.add_handler(CommandHandler("pin", receber_pin))
-            app.add_handler(CommandHandler("parar", parar))
-            app.add_handler(CommandHandler("meusdados", meusdados))
-            app.add_handler(CommandHandler("historico", historico_command))
-            app.add_handler(CommandHandler("help", help_command))
-            app.add_handler(CommandHandler("senhas", admin_senhas))
-            app.add_handler(CommandHandler("revogar", admin_revogar))
-
-            app.add_error_handler(handle_error)
-
+            app = _build_app()
             logger.info("✅ Bot pronto e rodando!")
-            app.run_polling(drop_pending_updates=True)
 
+            async with app:
+                await app.start()
+                await app.updater.start_polling(drop_pending_updates=True)
+                # Aguarda indefinidamente; PTB reconecta internamente.
+                # O processo é encerrado pelo Discloud via SIGTERM.
+                await asyncio.Event().wait()
+                await app.updater.stop()
+                await app.stop()
+
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Bot encerrado.")
+            return
         except (NetworkError, TimedOut, TelegramError) as e:
-            logger.warning("Erro de conexão com Telegram: %s. Tentando reconectar em 5s...", e)
-            time.sleep(5)
+            logger.warning("Erro de conexão: %s. Reconectando em 5s...", e)
+            await asyncio.sleep(5)
         except Exception as e:
             logger.exception("Erro inesperado: %s", e)
-            time.sleep(10)
+            await asyncio.sleep(10)
+
+
+def iniciar_bot():
+    validar_configuracao()
+    asyncio.run(_async_main())
 
 
 if __name__ == "__main__":
