@@ -1,4 +1,4 @@
-# === bot.py ===
+# == bot.py ==
 import logging
 import threading
 import asyncio
