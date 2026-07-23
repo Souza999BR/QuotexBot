@@ -194,93 +194,251 @@ def _mercado_lateralizado(fechamentos, janela=10, limiar_pct=0.15):
 
 
 def analisar(velas_m5, velas_m15, confianca_minima=CONFIANCA_MINIMA_PADRAO):
-    """Analisa velas M5 (operacional) e M15 (confirmação de tendência) e
-    decide se há uma entrada válida.
-
-    Retorna um dict:
-        {
-            "direcao": "call" | "put" | None,
-            "confianca": float (0-100),
-            "motivo_ignorado": str | None,
-            "detalhes": {...}  # para log/depuração
-        }
     """
+    Modelo adaptativo por pontuação.
+
+    Mantém compatibilidade total:
+    retorno:
+    {
+        "direcao": "call" | "put" | None,
+        "confianca": float,
+        "motivo_ignorado": str | None,
+        "detalhes": {}
+    }
+    """
+
     velas_m5 = _normalizar_velas(velas_m5)
     velas_m15 = _normalizar_velas(velas_m15)
 
     detalhes = {}
 
     if len(velas_m5) < MEDIA_LENTA + 3 or len(velas_m15) < MEDIA_LENTA + 3:
-        return {"direcao": None, "confianca": 0.0, "motivo_ignorado": "dados_insuficientes", "detalhes": {}}
 
-    fechamentos_m5 = [v["close"] for v in velas_m5]
-    fechamentos_m15 = [v["close"] for v in velas_m15]
+        logger.info(
+            "Ignorado: dados_insuficientes | %s",
+            detalhes
+        )
 
-    # 1. Tendência principal (confirmada no M15), operada a favor no M5.
-    tendencia_m15 = _tendencia(fechamentos_m15)
-    tendencia_m5 = _tendencia(fechamentos_m5)
+        return {
+            "direcao": None,
+            "confianca": 0.0,
+            "motivo_ignorado": "dados_insuficientes",
+            "detalhes": detalhes
+        }
+
+
+    fechamentos_m5 = [
+        v["close"] for v in velas_m5
+    ]
+
+    fechamentos_m15 = [
+        v["close"] for v in velas_m15
+    ]
+
+
+    pontos_call = 0
+    pontos_put = 0
+
+
+    # ==========================
+    # 1 - Tendência M15 +30
+    # ==========================
+
+    tendencia_m15 = _tendencia(
+        fechamentos_m15
+    )
+
+    tendencia_m5 = _tendencia(
+        fechamentos_m5
+    )
+
+
     detalhes["tendencia_m15"] = tendencia_m15
     detalhes["tendencia_m5"] = tendencia_m5
 
-    if not tendencia_m15 or tendencia_m15 != tendencia_m5:
-        return {"direcao": None, "confianca": 0.0, "motivo_ignorado": "sem_tendencia_alinhada", "detalhes": detalhes}
 
-    # 2. Filtros de descarte: candle muito pequena ou mercado lateralizado.
-    if _candle_muito_pequena(velas_m5):
-        return {"direcao": None, "confianca": 0.0, "motivo_ignorado": "candle_muito_pequena", "detalhes": detalhes}
+    if tendencia_m15 == "alta":
+        pontos_call += 30
 
-    if _mercado_lateralizado(fechamentos_m5):
-        return {"direcao": None, "confianca": 0.0, "motivo_ignorado": "mercado_lateralizado", "detalhes": detalhes}
+    elif tendencia_m15 == "baixa":
+        pontos_put += 30
 
-    # 3. Suporte e resistência.
-    topos, fundos = _suporte_resistencia(velas_m5)
-    preco_atual = velas_m5[-1]["close"]
-    perto_suporte = _perto_de(preco_atual, fundos)
-    perto_resistencia = _perto_de(preco_atual, topos)
+
+
+    # ==========================
+    # 2 - Confirmação M5 +20
+    # ==========================
+
+    if tendencia_m5 == "alta":
+        pontos_call += 20
+
+    elif tendencia_m5 == "baixa":
+        pontos_put += 20
+
+
+
+    # ==========================
+    # 3 - RSI +20
+    # ==========================
+
+    rsi = _rsi(
+        fechamentos_m5
+    )
+
+
+    detalhes["rsi"] = (
+        round(rsi,2)
+        if rsi is not None
+        else None
+    )
+
+
+    if rsi is not None:
+
+        # sobrevenda favorece CALL
+        if rsi < 40:
+            pontos_call += 20
+
+
+        # sobrecompra favorece PUT
+        elif rsi > 60:
+            pontos_put += 20
+
+
+
+    # ==========================
+    # 4 - Padrão Candle +20
+    # ==========================
+
+    padrao, sinal_padrao = _padrao_candle(
+        velas_m5
+    )
+
+
+    detalhes["padrao"] = padrao
+
+
+    if sinal_padrao == "call":
+
+        pontos_call += 20
+
+
+    elif sinal_padrao == "put":
+
+        pontos_put += 20
+
+
+
+    # ==========================
+    # 5 - Suporte / Resistência +10
+    # ==========================
+
+    topos, fundos = _suporte_resistencia(
+        velas_m5
+    )
+
+
+    preco = velas_m5[-1]["close"]
+
+
+    perto_suporte = _perto_de(
+        preco,
+        fundos
+    )
+
+
+    perto_resistencia = _perto_de(
+        preco,
+        topos
+    )
+
+
     detalhes["perto_suporte"] = perto_suporte
     detalhes["perto_resistencia"] = perto_resistencia
 
-    # 4. Padrão de candle.
-    padrao, sinal_padrao = _padrao_candle(velas_m5)
-    detalhes["padrao"] = padrao
 
-    # 5. RSI.
-    rsi = _rsi(fechamentos_m5)
-    detalhes["rsi"] = round(rsi, 2) if rsi is not None else None
-    if rsi is None:
-        return {"direcao": None, "confianca": 0.0, "motivo_ignorado": "rsi_indisponivel", "detalhes": detalhes}
-    if 45 <= rsi <= 55:
-        return {"direcao": None, "confianca": 0.0, "motivo_ignorado": "rsi_neutro", "detalhes": detalhes}
+    if perto_suporte:
+        pontos_call += 10
 
-    # 6. Decide a direção candidata combinando tendência + região + padrão + RSI.
-    direcao = None
-    if tendencia_m15 == "alta" and perto_suporte and sinal_padrao == "call" and rsi < 35:
+
+    if perto_resistencia:
+        pontos_put += 10
+
+
+
+    # ==========================
+    # Resultado final
+    # ==========================
+
+    detalhes["pontos_call"] = pontos_call
+    detalhes["pontos_put"] = pontos_put
+
+
+    if pontos_call > pontos_put:
+
         direcao = "call"
-    elif tendencia_m15 == "baixa" and perto_resistencia and sinal_padrao == "put" and rsi > 65:
+        confianca = pontos_call
+
+
+    elif pontos_put > pontos_call:
+
         direcao = "put"
+        confianca = pontos_put
 
-    if not direcao:
-        return {"direcao": None, "confianca": 0.0, "motivo_ignorado": "condicoes_nao_atendidas", "detalhes": detalhes}
 
-    # 7. Pontuação de confiança (0-100), conforme a fórmula:
-    #    tendência 40% + padrão de candle 30% + RSI 20% + região 10%.
-    pontos_tendencia = 100.0  # já exigimos alinhamento total M15==M5 acima
-    pontos_padrao = 100.0 if padrao in ("martelo", "estrela_cadente", "engolfo_alta", "engolfo_baixa") else 0.0
-    if direcao == "call":
-        pontos_rsi = max(0.0, min(100.0, (35 - rsi) / 35 * 100 + 50))
     else:
-        pontos_rsi = max(0.0, min(100.0, (rsi - 65) / 35 * 100 + 50))
-    pontos_regiao = 100.0 if (perto_suporte or perto_resistencia) else 0.0
 
-    confianca = (
-        pontos_tendencia * 0.40
-        + pontos_padrao * 0.30
-        + pontos_rsi * 0.20
-        + pontos_regiao * 0.10
-    )
-    detalhes["confianca_calculada"] = round(confianca, 2)
+        logger.info(
+            "Ignorado: empate_pontuacao | %s",
+            detalhes
+        )
+
+        return {
+            "direcao": None,
+            "confianca": 0.0,
+            "motivo_ignorado": "empate_pontuacao",
+            "detalhes": detalhes
+        }
+
+
+
+    detalhes["confianca_final"] = confianca
+
+
+
+    # ==========================
+    # Entrada mínima
+    # ==========================
 
     if confianca < confianca_minima:
-        return {"direcao": None, "confianca": confianca, "motivo_ignorado": "confianca_insuficiente", "detalhes": detalhes}
 
-    return {"direcao": direcao, "confianca": confianca, "motivo_ignorado": None, "detalhes": detalhes}
+        logger.info(
+            "Ignorado: pontuacao_baixa %s | %s",
+            confianca,
+            detalhes
+        )
+
+
+        return {
+            "direcao": None,
+            "confianca": confianca,
+            "motivo_ignorado": "pontuacao_baixa",
+            "detalhes": detalhes
+        }
+
+
+
+    logger.info(
+        "SINAL %s | confiança=%s | detalhes=%s",
+        direcao,
+        confianca,
+        detalhes
+    )
+
+
+    return {
+        "direcao": direcao,
+        "confianca": confianca,
+        "motivo_ignorado": None,
+        "detalhes": detalhes
+    }
