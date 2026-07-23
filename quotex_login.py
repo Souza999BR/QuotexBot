@@ -340,7 +340,6 @@ def _executar_automatico_em_thread(uid: str, config: dict, chat_id: int):
 # ---------------------------------------------------------------------------
 # Loop de operações (manual e automático compartilham este mesmo loop)
 # ---------------------------------------------------------------------------
-
 async def _conectar_com_pin(
     uid: str,
     client: Quotex,
@@ -348,8 +347,6 @@ async def _conectar_com_pin(
     chat_id: int
 ) -> bool:
     """Tenta conectar, resolvendo o fluxo de PIN se a Quotex exigir."""
-
-    import shutil
 
     tentativas = 0
 
@@ -362,8 +359,17 @@ async def _conectar_com_pin(
                 timeout=30
             )
 
+
             if check:
+
+                logger.info(
+                    "Conexão Quotex realizada com sucesso user %s",
+                    uid
+                )
+
                 return True
+
+
 
             logger.error(
                 "Falha na conexão (user %s): %s",
@@ -371,17 +377,36 @@ async def _conectar_com_pin(
                 reason
             )
 
+
+            # Se a sessão existir, tenta manter
+            # sem destruir cookies Cloudflare
+
             await enviar_telegram(
                 chat_id,
                 f"❌ Falha na conexão com a Quotex: {reason}\n"
-                "Verifique sua conexão e tente novamente."
+                "Tentando reutilizar sessão salva..."
             )
 
-            return False
+
+            tentativas += 1
+
+
+            if tentativas >= MAX_PIN_TENTATIVAS:
+
+                return False
+
+
+            await asyncio.sleep(3)
+
+            continue
+
+
+
 
         except asyncio.TimeoutError:
 
             tentativas += 1
+
 
             logger.warning(
                 "Timeout de conexão user %s (%d/%d)",
@@ -390,72 +415,106 @@ async def _conectar_com_pin(
                 MAX_PIN_TENTATIVAS
             )
 
+
             auditoria.registrar(
                 uid,
                 "timeout_conexao",
                 f"tentativa={tentativas}"
             )
 
+
             pasta = _session_dir(uid)
+
 
             try:
 
-                shutil.rmtree(
-                    pasta,
-                    ignore_errors=True
-                )
-
-                os.makedirs(
-                    pasta,
-                    exist_ok=True
-                )
-
-                client = Quotex(
+                novo_client = Quotex(
                     email=config["emailQuotex"],
                     password=config["senhaQuotex"],
                     root_path=pasta,
                     lang="pt"
                 )
 
-                client.pin_code = None
-                client.email_imap = config.get("email_imap") or None
-                client.email_imap_password = (
-                    config.get("email_imap_password") or None
+
+                novo_client.pin_code = None
+
+
+                novo_client.email_imap = (
+                    config.get("email_imap")
+                    or None
                 )
+
+
+                novo_client.email_imap_password = (
+                    config.get("email_imap_password")
+                    or None
+                )
+
+
 
                 modo = (
                     "REAL"
                     if str(
-                        config.get("tipo", "demo")
+                        config.get(
+                            "tipo",
+                            "demo"
+                        )
                     ).lower() == "real"
                     else "PRACTICE"
                 )
 
-                client.set_account_mode(modo)
+
+                novo_client.set_account_mode(
+                    modo
+                )
+
+
+                # mantém referência atualizada
+                client = novo_client
 
                 _CLIENTES[uid] = client
 
+
+
+                logger.info(
+                    "Cliente recriado mantendo sessão user %s",
+                    uid
+                )
+
+
+
             except Exception as exc:
 
+
                 logger.exception(
-                    "Erro ao recriar sessão do usuário %s: %s",
+                    "Erro ao recriar cliente user %s: %s",
                     uid,
                     exc
                 )
 
+
+
             await enviar_telegram(
                 chat_id,
-                "⚠️ A conexão demorou demais.\n"
-                "🔄 Limpando a sessão e tentando novamente..."
+                "⚠️ Conexão demorou demais.\n"
+                "🔄 Tentando reconectar usando sessão salva..."
             )
+
+
 
             await asyncio.sleep(3)
 
+
             continue
+
+
+
+
 
         except PinRequiredError as exc:
 
             tentativas += 1
+
 
             logger.info(
                 "PIN solicitado para user %s "
@@ -465,28 +524,49 @@ async def _conectar_com_pin(
                 MAX_PIN_TENTATIVAS
             )
 
+
             auditoria.registrar(
                 uid,
                 "pin_solicitado",
                 str(exc)
             )
 
+
+
             await enviar_telegram(
                 chat_id,
                 "🔐 A Quotex está pedindo "
-                "o código PIN enviado para o seu e-mail.\n"
-                "Envie com: /pin XXXXXX\n"
-                f"(Tentativa {tentativas}/"
-                f"{MAX_PIN_TENTATIVAS})"
+                "o código PIN enviado para seu e-mail.\n\n"
+                "Envie usando:\n"
+                "/pin XXXXXX\n\n"
+                f"Tentativa {tentativas}/"
+                f"{MAX_PIN_TENTATIVAS}"
             )
+
+
 
             event = asyncio.Event()
 
+
             _PIN_EVENTOS[uid] = event
+
 
             await event.wait()
 
-            _PIN_EVENTOS.pop(uid, None)
+
+
+            _PIN_EVENTOS.pop(
+                uid,
+                None
+            )
+
+
+
+            continue
+
+
+
+
 
         except LoginFailedError as exc:
 
@@ -496,11 +576,13 @@ async def _conectar_com_pin(
                 exc
             )
 
+
             auditoria.registrar(
                 uid,
                 "login_falhou",
                 str(exc)
             )
+
 
             await enviar_telegram(
                 chat_id,
@@ -509,7 +591,12 @@ async def _conectar_com_pin(
                 "em /ajustaconfig e tente novamente."
             )
 
+
             return False
+
+
+
+
 
         except Exception as exc:
 
@@ -520,18 +607,26 @@ async def _conectar_com_pin(
                 exc
             )
 
+
             auditoria.registrar(
                 uid,
                 "erro_conexao",
                 str(exc)
             )
 
+
+
             await enviar_telegram(
                 chat_id,
                 f"❌ Erro inesperado: {exc}"
             )
 
+
             return False
+
+
+
+
 
     await enviar_telegram(
         chat_id,
@@ -540,10 +635,12 @@ async def _conectar_com_pin(
         "Tente novamente em alguns minutos."
     )
 
+
     auditoria.registrar(
         uid,
         "conexao_esgotada"
     )
+
 
     return False
 
