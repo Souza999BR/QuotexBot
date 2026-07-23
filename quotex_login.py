@@ -341,52 +341,210 @@ def _executar_automatico_em_thread(uid: str, config: dict, chat_id: int):
 # Loop de operações (manual e automático compartilham este mesmo loop)
 # ---------------------------------------------------------------------------
 
-async def _conectar_com_pin(uid: str, client: Quotex, chat_id: int) -> bool:
+async def _conectar_com_pin(
+    uid: str,
+    client: Quotex,
+    config: dict,
+    chat_id: int
+) -> bool:
     """Tenta conectar, resolvendo o fluxo de PIN se a Quotex exigir."""
+
+    import shutil
+
     tentativas = 0
+
     while tentativas < MAX_PIN_TENTATIVAS:
+
         try:
-            check, reason = await client.connect()
+
+            check, reason = await asyncio.wait_for(
+                client.connect(),
+                timeout=30
+            )
+
             if check:
                 return True
-            logger.error("Falha na conexão (user %s): %s", uid, reason)
+
+            logger.error(
+                "Falha na conexão (user %s): %s",
+                uid,
+                reason
+            )
+
             await enviar_telegram(
                 chat_id,
                 f"❌ Falha na conexão com a Quotex: {reason}\n"
-                "Verifique sua conexão e tente novamente.",
+                "Verifique sua conexão e tente novamente."
             )
+
             return False
 
-        except PinRequiredError as exc:
+        except asyncio.TimeoutError:
+
             tentativas += 1
-            logger.info("PIN solicitado para user %s (tentativa %d/%d)", uid, tentativas, MAX_PIN_TENTATIVAS)
-            auditoria.registrar(uid, "pin_solicitado", str(exc))
+
+            logger.warning(
+                "Timeout de conexão user %s (%d/%d)",
+                uid,
+                tentativas,
+                MAX_PIN_TENTATIVAS
+            )
+
+            auditoria.registrar(
+                uid,
+                "timeout_conexao",
+                f"tentativa={tentativas}"
+            )
+
+            pasta = _session_dir(uid)
+
+            try:
+
+                shutil.rmtree(
+                    pasta,
+                    ignore_errors=True
+                )
+
+                os.makedirs(
+                    pasta,
+                    exist_ok=True
+                )
+
+                client = Quotex(
+                    email=config["emailQuotex"],
+                    password=config["senhaQuotex"],
+                    root_path=pasta,
+                    lang="pt"
+                )
+
+                client.pin_code = None
+                client.email_imap = config.get("email_imap") or None
+                client.email_imap_password = (
+                    config.get("email_imap_password") or None
+                )
+
+                modo = (
+                    "REAL"
+                    if str(
+                        config.get("tipo", "demo")
+                    ).lower() == "real"
+                    else "PRACTICE"
+                )
+
+                client.set_account_mode(modo)
+
+                _CLIENTES[uid] = client
+
+            except Exception as exc:
+
+                logger.exception(
+                    "Erro ao recriar sessão do usuário %s: %s",
+                    uid,
+                    exc
+                )
+
             await enviar_telegram(
                 chat_id,
-                "🔐 A Quotex está pedindo o código PIN enviado para o seu e-mail.\n"
-                f"Envie com: /pin XXXXXX\n"
-                f"(Tentativa {tentativas}/{MAX_PIN_TENTATIVAS})",
+                "⚠️ A conexão demorou demais.\n"
+                "🔄 Limpando a sessão e tentando novamente..."
             )
+
+            await asyncio.sleep(3)
+
+            continue
+
+        except PinRequiredError as exc:
+
+            tentativas += 1
+
+            logger.info(
+                "PIN solicitado para user %s "
+                "(tentativa %d/%d)",
+                uid,
+                tentativas,
+                MAX_PIN_TENTATIVAS
+            )
+
+            auditoria.registrar(
+                uid,
+                "pin_solicitado",
+                str(exc)
+            )
+
+            await enviar_telegram(
+                chat_id,
+                "🔐 A Quotex está pedindo "
+                "o código PIN enviado para o seu e-mail.\n"
+                "Envie com: /pin XXXXXX\n"
+                f"(Tentativa {tentativas}/"
+                f"{MAX_PIN_TENTATIVAS})"
+            )
+
             event = asyncio.Event()
+
             _PIN_EVENTOS[uid] = event
+
             await event.wait()
+
             _PIN_EVENTOS.pop(uid, None)
 
         except LoginFailedError as exc:
-            logger.error("Login falhou para user %s: %s", uid, exc)
-            auditoria.registrar(uid, "login_falhou", str(exc))
+
+            logger.error(
+                "Login falhou para user %s: %s",
+                uid,
+                exc
+            )
+
+            auditoria.registrar(
+                uid,
+                "login_falhou",
+                str(exc)
+            )
+
             await enviar_telegram(
                 chat_id,
                 f"❌ Login falhou: {exc.message}\n"
-                "Verifique e-mail/senha em /ajustaconfig e tente novamente.",
+                "Verifique e-mail/senha "
+                "em /ajustaconfig e tente novamente."
             )
+
+            return False
+
+        except Exception as exc:
+
+            logger.exception(
+                "Erro inesperado na conexão "
+                "(user %s): %s",
+                uid,
+                exc
+            )
+
+            auditoria.registrar(
+                uid,
+                "erro_conexao",
+                str(exc)
+            )
+
+            await enviar_telegram(
+                chat_id,
+                f"❌ Erro inesperado: {exc}"
+            )
+
             return False
 
     await enviar_telegram(
         chat_id,
-        "❌ Código PIN inválido ou expirado após 3 tentativas. Tente novamente.",
+        "❌ Não foi possível conectar "
+        "após várias tentativas.\n"
+        "Tente novamente em alguns minutos."
     )
-    auditoria.registrar(uid, "pin_esgotado")
+
+    auditoria.registrar(
+        uid,
+        "conexao_esgotada"
+    )
+
     return False
 
 
@@ -441,7 +599,7 @@ async def _loop_operacoes(
 
     await enviar_telegram(chat_id, "⏳ Conectando à Quotex...")
 
-    ok = await _conectar_com_pin(uid, client, chat_id)
+    ok = await _conectar_com_pin(uid, client, config, chat_id)
     if not ok:
         EXECUTANDO[uid] = False
         _CLIENTES.pop(uid, None)
