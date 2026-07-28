@@ -1,7 +1,6 @@
-# == bot.py ==
+# === bot.py ===
 import logging
 import threading
-import asyncio
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -14,7 +13,7 @@ from telegram.request import HTTPXRequest
 from shared import USERS_DATA, CADASTRADOS, salvar_dados, cifrar_config_usuario
 from quotex_login import (
     iniciar_estrategia_com_pin, iniciar_automatico,
-    submeter_pin, cancelar_estrategia,
+    cancelar_estrategia,
     EXECUTANDO, MODO_AUTO,
     enviar_telegram, obter_historico_hoje,
 )
@@ -30,11 +29,11 @@ logger = logging.getLogger("bot")
 
 # === Estados ===
 (
-    EMAIL_QUOTEX, SENHA_QUOTEX, LOGIN_AUTOMATICO, EMAIL_IMAP, SENHA_IMAP,
+    EMAIL_QUOTEX, SENHA_QUOTEX,
     VALOR_ENTRADA, TIPO_CONTA, TEMPO_EXPIRACAO, SIMBOLO,
     STOP_WIN, STOP_LOSS, USAR_MARTINGALE, FATOR_MARTINGALE, CONFIRMAR,
     AJUSTAR_CAMPO, NOVO_VALOR, VALIDAR_SENHA, NOVO_USUARIO_ID
-) = range(18)
+) = range(15)
 
 CAMPOS_SENSIVEIS_LOG = {"senhaQuotex", "senha", "email_imap_password"}
 
@@ -63,11 +62,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/ajustaconfig - Ajustar configurações existentes\n"
         "/iniciar - Iniciar operações manualmente (roda até /parar)\n"
         "/automatico - Modo automático: opera seg-sex das 08:00 às 10:30\n"
-        "/pin - Enviar o código PIN quando a Quotex solicitar\n"
         "/parar - Parar /iniciar ou /automatico\n"
         "/historico - Ver operações de hoje\n"
         "/meusdados - Exibir suas configurações\n"
-        "/help - Suporte e informações"
+        "/help - Suporte e informações\n\n"
+        "⚠️ IMPORTANTE: Certifique-se de que o PIN de verificação esteja "
+        "DESABILITADO na sua conta Quotex para que o login funcione corretamente.\n"
+        "Acesse: quotex.io → Configurações → Segurança → Desativar PIN"
     )
 
 
@@ -147,7 +148,12 @@ async def config_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     context.user_data.clear()
-    await update.message.reply_text("📧 Qual o e-mail da Quotex?")
+    await update.message.reply_text(
+        "📧 Qual o e-mail da Quotex?\n\n"
+        "⚠️ Certifique-se de que o PIN de verificação está DESABILITADO "
+        "na sua conta Quotex antes de continuar.\n"
+        "(quotex.io → Configurações → Segurança → Desativar PIN)"
+    )
     return EMAIL_QUOTEX
 
 
@@ -159,50 +165,10 @@ async def receber_email(update, context):
 
 async def receber_senha(update, context):
     context.user_data['senhaQuotex'] = update.message.text.strip()
-    await update.message.reply_text(
-        "🤖 Deseja ativar o login automático?\n"
-        "Se SIM, sempre que a Quotex pedir o código PIN de verificação, o bot vai "
-        "buscá-lo sozinho no seu e-mail (via IMAP), sem você precisar fazer nada.\n"
-        "Se NÃO, sempre que a Quotex pedir o código, o bot vai te avisar aqui e você "
-        "precisará checar o e-mail e responder com /pin 123456.\n"
-        "Responda S ou N:"
-    )
-    return LOGIN_AUTOMATICO
-
-
-async def receber_login_automatico(update, context):
-    resposta = update.message.text.strip().upper()
-    if resposta not in ["S", "N"]:
-        await update.message.reply_text("❌ Digite apenas 'S' para sim ou 'N' para não.")
-        return LOGIN_AUTOMATICO
-
-    context.user_data['login_automatico'] = resposta
-    if resposta == "N":
-        context.user_data['email_imap'] = ""
-        context.user_data['email_imap_password'] = ""
-        await update.message.reply_text("💰 Valor da entrada:")
-        return VALOR_ENTRADA
-
-    await update.message.reply_text(
-        "📧 Envie o e-mail usado para receber o código PIN da Quotex "
-        "(geralmente o mesmo e-mail da conta). Ele só será acessado para ler "
-        "o código, via IMAP."
-    )
-    return EMAIL_IMAP
-
-
-async def receber_email_imap(update, context):
-    context.user_data['email_imap'] = update.message.text.strip()
-    await update.message.reply_text(
-        "🔑 Envie a senha de aplicativo (App Password) desse e-mail, para acesso IMAP.\n"
-        "⚠️ No Gmail, crie uma 'senha de app' em myaccount.google.com/apppasswords — "
-        "não use a senha normal da conta."
-    )
-    return SENHA_IMAP
-
-
-async def receber_senha_imap(update, context):
-    context.user_data['email_imap_password'] = update.message.text.strip()
+    # PIN removido do fluxo — login direto sem código de verificação
+    context.user_data['login_automatico'] = 'N'
+    context.user_data['email_imap'] = ''
+    context.user_data['email_imap_password'] = ''
     await update.message.reply_text("💰 Valor da entrada:")
     return VALOR_ENTRADA
 
@@ -313,9 +279,6 @@ async def ajusta_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     botoes = [
         [InlineKeyboardButton("📧 Email", callback_data="emailQuotex")],
         [InlineKeyboardButton("🔐 Senha", callback_data="senhaQuotex")],
-        [InlineKeyboardButton("🤖 Login automático (S/N)", callback_data="login_automatico")],
-        [InlineKeyboardButton("📧 Email IMAP (PIN automático)", callback_data="email_imap")],
-        [InlineKeyboardButton("🔑 Senha IMAP (PIN automático)", callback_data="email_imap_password")],
         [InlineKeyboardButton("💰 Valor Entrada", callback_data="valor_entrada")],
         [InlineKeyboardButton("🏦 Tipo de Conta (real/demo)", callback_data="tipo")],
         [InlineKeyboardButton("⏳ Tempo Expiração (min)", callback_data="time")],
@@ -362,7 +325,7 @@ async def receber_novo_valor(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if valor not in ["real", "demo"]:
             await update.message.reply_text("⚠️ Valor inválido. Digite apenas *real* ou *demo*.", parse_mode="Markdown")
             return NOVO_VALOR
-    elif campo in ("usar_martingale", "login_automatico"):
+    elif campo == "usar_martingale":
         valor = valor.upper()
         if valor not in ["S", "N"]:
             await update.message.reply_text("⚠️ Valor inválido. Digite apenas *S* ou *N*.", parse_mode="Markdown")
@@ -387,7 +350,7 @@ async def receber_novo_valor(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return NOVO_VALOR
 
     config_atual = dict(USERS_DATA[uid])
-    if campo in ("emailQuotex", "senhaQuotex", "email_imap", "email_imap_password"):
+    if campo in ("emailQuotex", "senhaQuotex"):
         # Recifra apenas o campo alterado, sem tocar nos demais.
         config_atual[campo] = cifrar_config_usuario({campo: valor})[campo]
     else:
@@ -420,7 +383,6 @@ async def meusdados(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Stop Win: {dados.get('stop_win')} | Stop Loss: {dados.get('stop_loss')}\n"
         f"Confiança mínima da estratégia: {dados.get('confianca_minima', 75)}%\n"
         f"Limite de perdas consecutivas: {dados.get('limite_perdas_consecutivas', 3)}\n"
-        f"Login automático (PIN por e-mail): {dados.get('login_automatico', 'N')}\n"
         f"Parado hoje: {'Sim' if estado_diario.esta_parado_hoje(uid) else 'Não'}"
     )
     await update.message.reply_text(texto, parse_mode="Markdown")
@@ -468,18 +430,6 @@ async def automatico(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(texto)
 
 
-async def receber_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if not context.args:
-        await update.message.reply_text("Use: /pin 123456")
-        return
-    codigo = context.args[0].strip()
-    if not codigo.isdigit():
-        await update.message.reply_text("❌ O código PIN deve conter apenas números.")
-        return
-    await submeter_pin(user_id, codigo)
-
-
 async def parar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
     uid_str = str(uid)
@@ -494,7 +444,6 @@ async def historico_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Exibe as operações de HOJE do usuário."""
     uid = str(update.effective_chat.id)
     from datetime import datetime
-    hoje_fmt = datetime.now().strftime("%d/%m/%Y")
     ops = obter_historico_hoje(uid)
 
     if not ops:
@@ -526,7 +475,12 @@ async def historico_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❓ Para suporte, contate o administrador do bot.")
+    await update.message.reply_text(
+        "❓ Para suporte, contate o administrador do bot.\n\n"
+        "⚠️ Se o login estiver falhando, certifique-se de que o PIN de verificação "
+        "está DESABILITADO na sua conta Quotex:\n"
+        "quotex.io → Configurações → Segurança → Desativar PIN"
+    )
 
 
 # === Administração (senhas pessoais / licenças) ===
@@ -544,9 +498,6 @@ async def admin_receber_novo_usuario(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text("❌ Envie apenas o número do ID do Telegram.")
         return ConversationHandler.END
 
-    # Reemissão manual, feita pelo próprio admin (ex.: suporte). Diferente do
-    # /cadastro autoatendido, aqui é o admin quem decide entregar a senha
-    # diretamente ao usuário.
     senha_gerada = licencas.forcar_nova_senha(texto)
     await update.message.reply_text(f"✅ Senha reemitida para o usuário {texto}.\nSenha: {senha_gerada}")
     try:
@@ -624,119 +575,87 @@ async def _pos_inicializacao(application):
 
 
 # === Inicialização ===
-def _build_app():
-    """Constrói e configura a Application do PTB."""
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .request(HTTPXRequest())
-        .post_init(_pos_inicializacao)
-        .build()
-    )
+def iniciar_bot():
+    validar_configuracao()
 
-    senha_conv = ConversationHandler(
-        entry_points=[CommandHandler("senha", senha)],
-        states={VALIDAR_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, validar_senha)]},
-        fallbacks=[CommandHandler("cancel", cancelar)],
-    )
-
-    config_conv = ConversationHandler(
-        entry_points=[CommandHandler("config", config_start)],
-        states={
-            EMAIL_QUOTEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_email)],
-            SENHA_QUOTEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_senha)],
-            LOGIN_AUTOMATICO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_login_automatico)],
-            EMAIL_IMAP: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_email_imap)],
-            SENHA_IMAP: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_senha_imap)],
-            VALOR_ENTRADA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_valor)],
-            TIPO_CONTA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_tipo)],
-            TEMPO_EXPIRACAO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_tempo)],
-            SIMBOLO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_simbolo)],
-            STOP_WIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_stop_win)],
-            STOP_LOSS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_stop_loss)],
-            USAR_MARTINGALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_martingale)],
-            FATOR_MARTINGALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_fator)],
-            CONFIRMAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_config)],
-        },
-        fallbacks=[CommandHandler("cancel", cancelar)],
-    )
-
-    ajusta_conv = ConversationHandler(
-        entry_points=[CommandHandler("ajustaconfig", ajusta_config)],
-        states={
-            AJUSTAR_CAMPO: [CallbackQueryHandler(escolher_campo_callback)],
-            NOVO_VALOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_novo_valor)],
-        },
-        fallbacks=[CommandHandler("cancel", cancelar)],
-    )
-
-    admin_novo_usuario_conv = ConversationHandler(
-        entry_points=[CommandHandler("addusuario", admin_novo_usuario)],
-        states={
-            NOVO_USUARIO_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receber_novo_usuario)],
-        },
-        fallbacks=[CommandHandler("cancel", cancelar)],
-    )
-
-    app.add_handler(senha_conv)
-    app.add_handler(config_conv)
-    app.add_handler(ajusta_conv)
-    app.add_handler(admin_novo_usuario_conv)
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cadastro", cadastro))
-    app.add_handler(CommandHandler("iniciar", iniciar))
-    app.add_handler(CommandHandler("automatico", automatico))
-    app.add_handler(CommandHandler("pin", receber_pin))
-    app.add_handler(CommandHandler("parar", parar))
-    app.add_handler(CommandHandler("meusdados", meusdados))
-    app.add_handler(CommandHandler("historico", historico_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("senhas", admin_senhas))
-    app.add_handler(CommandHandler("revogar", admin_revogar))
-    app.add_error_handler(handle_error)
-
-    return app
-
-
-async def _async_main():
-    """Corrotina principal — compatível com Python 3.12+ / 3.14.
-
-    Usa a API async do PTB (async with app) em vez de run_polling(),
-    pois run_polling() chama asyncio.get_event_loop() que no Python 3.14
-    lança RuntimeError quando não há loop em execução.
-
-    O loop de retry fica aqui (async) para poder usar await asyncio.sleep()
-    sem bloquear a thread.
-    """
     while True:
         try:
             logger.info("🤖 Iniciando bot Telegram...")
-            app = _build_app()
+            app = (
+                ApplicationBuilder()
+                .token(TELEGRAM_BOT_TOKEN)
+                .request(HTTPXRequest())
+                .post_init(_pos_inicializacao)
+                .build()
+            )
+
+            senha_conv = ConversationHandler(
+                entry_points=[CommandHandler("senha", senha)],
+                states={VALIDAR_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, validar_senha)]},
+                fallbacks=[CommandHandler("cancel", cancelar)],
+            )
+
+            config_conv = ConversationHandler(
+                entry_points=[CommandHandler("config", config_start)],
+                states={
+                    EMAIL_QUOTEX:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_email)],
+                    SENHA_QUOTEX:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_senha)],
+                    VALOR_ENTRADA:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_valor)],
+                    TIPO_CONTA:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_tipo)],
+                    TEMPO_EXPIRACAO:  [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_tempo)],
+                    SIMBOLO:          [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_simbolo)],
+                    STOP_WIN:         [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_stop_win)],
+                    STOP_LOSS:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_stop_loss)],
+                    USAR_MARTINGALE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_martingale)],
+                    FATOR_MARTINGALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_fator)],
+                    CONFIRMAR:        [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_config)],
+                },
+                fallbacks=[CommandHandler("cancel", cancelar)],
+            )
+
+            ajusta_conv = ConversationHandler(
+                entry_points=[CommandHandler("ajustaconfig", ajusta_config)],
+                states={
+                    AJUSTAR_CAMPO: [CallbackQueryHandler(escolher_campo_callback)],
+                    NOVO_VALOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_novo_valor)],
+                },
+                fallbacks=[CommandHandler("cancel", cancelar)],
+            )
+
+            admin_novo_usuario_conv = ConversationHandler(
+                entry_points=[CommandHandler("addusuario", admin_novo_usuario)],
+                states={
+                    NOVO_USUARIO_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receber_novo_usuario)],
+                },
+                fallbacks=[CommandHandler("cancel", cancelar)],
+            )
+
+            app.add_handler(senha_conv)
+            app.add_handler(config_conv)
+            app.add_handler(ajusta_conv)
+            app.add_handler(admin_novo_usuario_conv)
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(CommandHandler("cadastro", cadastro))
+            app.add_handler(CommandHandler("iniciar", iniciar))
+            app.add_handler(CommandHandler("automatico", automatico))
+            app.add_handler(CommandHandler("parar", parar))
+            app.add_handler(CommandHandler("meusdados", meusdados))
+            app.add_handler(CommandHandler("historico", historico_command))
+            app.add_handler(CommandHandler("help", help_command))
+            app.add_handler(CommandHandler("senhas", admin_senhas))
+            app.add_handler(CommandHandler("revogar", admin_revogar))
+
+            app.add_error_handler(handle_error)
+
             logger.info("✅ Bot pronto e rodando!")
+            app.run_polling(drop_pending_updates=True)
 
-            async with app:
-                await app.start()
-                await app.updater.start_polling(drop_pending_updates=True)
-                # Aguarda indefinidamente; PTB reconecta internamente.
-                # O processo é encerrado pelo Discloud via SIGTERM.
-                await asyncio.Event().wait()
-                await app.updater.stop()
-                await app.stop()
-
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("Bot encerrado.")
-            return
         except (NetworkError, TimedOut, TelegramError) as e:
-            logger.warning("Erro de conexão: %s. Reconectando em 5s...", e)
-            await asyncio.sleep(5)
+            logger.warning("Erro de conexão com Telegram: %s. Tentando reconectar em 5s...", e)
+            time.sleep(5)
         except Exception as e:
             logger.exception("Erro inesperado: %s", e)
-            await asyncio.sleep(10)
-
-
-def iniciar_bot():
-    validar_configuracao()
-    asyncio.run(_async_main())
+            time.sleep(10)
 
 
 if __name__ == "__main__":

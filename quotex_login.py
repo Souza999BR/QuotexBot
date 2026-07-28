@@ -5,15 +5,19 @@ Modos de operação:
   /automatico → scheduler que inicia o loop todo dia útil 08:00-10:30
   /parar      → para ambos os modos
 
-Fluxo de PIN:
-  1. connect() lança PinRequiredError → bot avisa o usuário com /pin
-  2. /pin XXXXXX → submeter_pin(user_id, codigo) define client.pin_code
-  3. O asyncio.Event é destravado → connect() é refeita com o PIN
+IMPORTANTE: O PIN de login foi removido do fluxo. Se a Quotex solicitar PIN,
+  o usuário é orientado a desabilitar essa opção nas configurações da conta.
+  Isso elimina interrupções no login automático.
+
+Isolamento de sessão:
+  Cada usuário tem seu próprio diretório sessions/<user_id>/ para que
+  session.json não seja compartilhado entre contas.
+  Quando o token/sessão está desatualizado, o session.json é apagado e
+  recriado automaticamente, sem intervenção do usuário.
 
 Assinaturas que bot.py espera:
     async iniciar_estrategia_com_pin(user_id) -> str
     async iniciar_automatico(user_id) -> str
-    async submeter_pin(user_id, pin_code)
     cancelar_estrategia(user_id) -> bool
     obter_historico_hoje(user_id) -> list[dict]
     EXECUTANDO: dict[str, bool]
@@ -23,8 +27,10 @@ Assinaturas que bot.py espera:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import shutil
 import threading
 import time as _time
 from datetime import datetime, timedelta
@@ -43,7 +49,7 @@ from shared import USERS_DATA
 
 logger = logging.getLogger(__name__)
 
-MAX_PIN_TENTATIVAS = 3
+MAX_TENTATIVAS_LOGIN = 3
 
 # Janela de operações do modo automático
 AUTO_ABERTURA  = dtime(8, 0, 0)
@@ -61,9 +67,6 @@ MODO_AUTO: dict[str, bool] = {}
 
 # {str(user_id): Quotex} — clientes ativos
 _CLIENTES: dict[str, Quotex] = {}
-
-# {str(user_id): asyncio.Event} — destravado quando o usuário envia /pin
-_PIN_EVENTOS: dict[str, asyncio.Event] = {}
 
 # {str(user_id): asyncio.AbstractEventLoop} — loop de cada thread de usuário
 _LOOPS: dict[str, asyncio.AbstractEventLoop] = {}
@@ -141,6 +144,65 @@ def obter_historico_hoje(user_id: int | str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Gerenciamento de sessão por usuário
+# ---------------------------------------------------------------------------
+
+def _session_dir(user_id: str) -> str:
+    """Retorna (e cria se necessário) o diretório de sessão exclusivo do usuário."""
+    path = os.path.join("Sessions", user_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _limpar_session(uid: str):
+    """Remove o session.json do usuário para forçar novo login/token."""
+    pasta = _session_dir(uid)
+    session_file = os.path.join(pasta, "session.json")
+    try:
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            logger.info("session.json de %s removido para renovação de token.", uid)
+        else:
+            logger.debug("session.json de %s não existe, nada a remover.", uid)
+    except Exception as exc:
+        logger.warning("Erro ao remover session.json de %s: %s", uid, exc)
+
+
+def _criar_session_vazia(uid: str):
+    """Cria um session.json em branco para o usuário."""
+    pasta = _session_dir(uid)
+    session_file = os.path.join(pasta, "session.json")
+    try:
+        session_vazia = {
+            "cookies": None,
+            "token": None,
+            "user_agent": None,
+        }
+        with open(session_file, "w", encoding="utf-8") as f:
+            json.dump(session_vazia, f, indent=4)
+        logger.info("session.json vazio criado para %s.", uid)
+    except Exception as exc:
+        logger.warning("Erro ao criar session.json vazio para %s: %s", uid, exc)
+
+
+def _criar_novo_cliente(uid: str, config: dict) -> Quotex:
+    """Cria e configura um novo cliente Quotex para o usuário."""
+    pasta = _session_dir(uid)
+    client = Quotex(
+        email=config["emailQuotex"],
+        password=config["senhaQuotex"],
+        root_path=pasta,
+        lang="pt",
+    )
+    client.pin_code = None
+    client.email_imap = config.get("email_imap") or None
+    client.email_imap_password = config.get("email_imap_password") or None
+    modo = "REAL" if str(config.get("tipo", "demo")).lower() == "real" else "PRACTICE"
+    client.set_account_mode(modo)
+    return client
+
+
+# ---------------------------------------------------------------------------
 # API pública chamada pelo bot.py
 # ---------------------------------------------------------------------------
 
@@ -198,27 +260,6 @@ async def iniciar_automatico(user_id: int | str) -> str:
     return "INICIADO"
 
 
-async def submeter_pin(user_id: int | str, pin_code: str):
-    """Entrega o PIN ao loop de login do usuário.
-
-    Pode ser chamado de qualquer thread (incluindo o loop principal do bot).
-    """
-    uid = str(user_id)
-    client = _CLIENTES.get(uid)
-    if client is None:
-        logger.warning("submeter_pin: nenhum cliente ativo para user %s", uid)
-        return
-
-    client.pin_code = pin_code.strip()
-
-    loop = _LOOPS.get(uid)
-    event = _PIN_EVENTOS.get(uid)
-    if loop and event:
-        loop.call_soon_threadsafe(event.set)
-    else:
-        logger.warning("submeter_pin: evento/loop não encontrado para user %s", uid)
-
-
 def cancelar_estrategia(user_id: int | str) -> bool:
     """Para o loop de operações E o scheduler automático do usuário.
 
@@ -267,8 +308,8 @@ async def _loop_automatico(uid: str, config: dict, chat_id: int):
 
     await enviar_telegram(
         chat_id,
-        "🤖 *Modo Automático Ativado!*\n\n"
-        "📅 Operações abertas automaticamente de *seg-sex, 08:00 às 10:30*.\n"
+        "🤖 Modo Automático Ativado!\n\n"
+        "📅 Operações abertas automaticamente de seg-sex, 08:00 às 10:30.\n"
         "Use /parar para desativar a qualquer momento.",
     )
 
@@ -305,7 +346,7 @@ async def _loop_automatico(uid: str, config: dict, chat_id: int):
             await enviar_telegram(
                 chat_id,
                 f"⏰ Modo automático em espera.\n"
-                f"📅 Próxima abertura: *{msg_proxima}*",
+                f"📅 Próxima abertura: {msg_proxima}",
             )
             logger.info(
                 "Auto user %s: aguardando %.0fs até %s", uid, segundos_totais, msg_proxima
@@ -338,312 +379,152 @@ def _executar_automatico_em_thread(uid: str, config: dict, chat_id: int):
 
 
 # ---------------------------------------------------------------------------
-# Loop de operações (manual e automático compartilham este mesmo loop)
+# Conexão — sem PIN, com renovação automática de sessão
 # ---------------------------------------------------------------------------
-async def _conectar_com_pin(
+
+async def _conectar(
     uid: str,
     client: Quotex,
     config: dict,
-    chat_id: int
-) -> bool:
-    """Tenta conectar, resolvendo o fluxo de PIN se a Quotex exigir."""
+    chat_id: int,
+) -> tuple[bool, Quotex]:
+    """Tenta conectar o cliente à Quotex.
 
+    - Se o token/cookies estiverem desatualizados (LoginFailedError), apaga
+      o session.json, recria o cliente e tenta novamente (até MAX_TENTATIVAS_LOGIN).
+    - Se a Quotex exigir PIN, orienta o usuário a desativar essa opção e
+      encerra o fluxo de login.
+    - Retorna (sucesso: bool, client_atualizado: Quotex).
+    """
     tentativas = 0
 
-    while tentativas < MAX_PIN_TENTATIVAS:
+    while tentativas < MAX_TENTATIVAS_LOGIN:
 
         try:
-
             check, reason = await asyncio.wait_for(
                 client.connect(),
-                timeout=30
+                timeout=30,
             )
-
 
             if check:
+                return True, client
 
-                logger.info(
-                    "Conexão Quotex realizada com sucesso user %s",
-                    uid
-                )
-
-                return True
-
-
-
-            logger.error(
-                "Falha na conexão (user %s): %s",
-                uid,
-                reason
-            )
-
-
-            # Se a sessão existir, tenta manter
-            # sem destruir cookies Cloudflare
-
+            logger.error("Falha na conexão (user %s): %s", uid, reason)
             await enviar_telegram(
                 chat_id,
                 f"❌ Falha na conexão com a Quotex: {reason}\n"
-                "Tentando reutilizar sessão salva..."
+                "Verifique sua conexão e tente novamente.",
             )
-
-
-            tentativas += 1
-
-
-            if tentativas >= MAX_PIN_TENTATIVAS:
-
-                return False
-
-
-            await asyncio.sleep(3)
-
-            continue
-
-
-
+            return False, client
 
         except asyncio.TimeoutError:
-
             tentativas += 1
-
-
             logger.warning(
                 "Timeout de conexão user %s (%d/%d)",
-                uid,
-                tentativas,
-                MAX_PIN_TENTATIVAS
+                uid, tentativas, MAX_TENTATIVAS_LOGIN,
             )
+            auditoria.registrar(uid, "timeout_conexao", f"tentativa={tentativas}")
 
-
-            auditoria.registrar(
-                uid,
-                "timeout_conexao",
-                f"tentativa={tentativas}"
-            )
-
-
-            pasta = _session_dir(uid)
-
-
+            # Limpa sessão e recria o cliente para a próxima tentativa
+            _limpar_session(uid)
+            _criar_session_vazia(uid)
             try:
-
-                novo_client = Quotex(
-                    email=config["emailQuotex"],
-                    password=config["senhaQuotex"],
-                    root_path=pasta,
-                    lang="pt"
-                )
-
-
-                novo_client.pin_code = None
-
-
-                novo_client.email_imap = (
-                    config.get("email_imap")
-                    or None
-                )
-
-
-                novo_client.email_imap_password = (
-                    config.get("email_imap_password")
-                    or None
-                )
-
-
-
-                modo = (
-                    "REAL"
-                    if str(
-                        config.get(
-                            "tipo",
-                            "demo"
-                        )
-                    ).lower() == "real"
-                    else "PRACTICE"
-                )
-
-
-                novo_client.set_account_mode(
-                    modo
-                )
-
-
-                # mantém referência atualizada
-                client = novo_client
-
+                client = _criar_novo_cliente(uid, config)
                 _CLIENTES[uid] = client
-
-
-
-                logger.info(
-                    "Cliente recriado mantendo sessão user %s",
-                    uid
-                )
-
-
-
             except Exception as exc:
-
-
-                logger.exception(
-                    "Erro ao recriar cliente user %s: %s",
-                    uid,
-                    exc
-                )
-
-
+                logger.exception("Erro ao recriar cliente (user %s): %s", uid, exc)
 
             await enviar_telegram(
                 chat_id,
-                "⚠️ Conexão demorou demais.\n"
-                "🔄 Tentando reconectar usando sessão salva..."
+                "⚠️ A conexão demorou demais.\n"
+                "🔄 Renovando sessão e tentando novamente...",
             )
-
-
-
             await asyncio.sleep(3)
-
-
             continue
-
-
-
-
-
-        except PinRequiredError as exc:
-
-            tentativas += 1
-
-
-            logger.info(
-                "PIN solicitado para user %s "
-                "(tentativa %d/%d)",
-                uid,
-                tentativas,
-                MAX_PIN_TENTATIVAS
-            )
-
-
-            auditoria.registrar(
-                uid,
-                "pin_solicitado",
-                str(exc)
-            )
-
-
-
-            await enviar_telegram(
-                chat_id,
-                "🔐 A Quotex está pedindo "
-                "o código PIN enviado para seu e-mail.\n\n"
-                "Envie usando:\n"
-                "/pin XXXXXX\n\n"
-                f"Tentativa {tentativas}/"
-                f"{MAX_PIN_TENTATIVAS}"
-            )
-
-
-
-            event = asyncio.Event()
-
-
-            _PIN_EVENTOS[uid] = event
-
-
-            await event.wait()
-
-
-
-            _PIN_EVENTOS.pop(
-                uid,
-                None
-            )
-
-
-
-            continue
-
-
-
-
 
         except LoginFailedError as exc:
-
+            # Token ou cookies desatualizados — apaga session.json e cria novo
             logger.error(
-                "Login falhou para user %s: %s",
-                uid,
-                exc
+                "Login falhou (user %s) — sessão desatualizada: %s. "
+                "Renovando token/cookies...",
+                uid, exc,
             )
-
-
-            auditoria.registrar(
-                uid,
-                "login_falhou",
-                str(exc)
-            )
-
+            auditoria.registrar(uid, "login_falhou_renovando_sessao", str(exc))
 
             await enviar_telegram(
                 chat_id,
-                f"❌ Login falhou: {exc.message}\n"
-                "Verifique e-mail/senha "
-                "em /ajustaconfig e tente novamente."
+                "🔄 Token/cookies desatualizados. Renovando sessão automaticamente...",
             )
 
+            # 1. Remove session.json deste usuário
+            _limpar_session(uid)
+            # 2. Cria session.json vazio para forçar novo login
+            _criar_session_vazia(uid)
+            # 3. Recria o cliente com sessão zerada
+            try:
+                client = _criar_novo_cliente(uid, config)
+                _CLIENTES[uid] = client
+            except Exception as recreate_exc:
+                logger.exception(
+                    "Erro ao recriar cliente após LoginFailedError (user %s): %s",
+                    uid, recreate_exc,
+                )
+                await enviar_telegram(
+                    chat_id,
+                    f"❌ Erro ao renovar sessão: {recreate_exc}\n"
+                    "Verifique e-mail/senha em /ajustaconfig.",
+                )
+                return False, client
 
-            return False
+            tentativas += 1
+            await asyncio.sleep(3)
+            continue
 
+        except PinRequiredError as exc:
+            # PIN de login ativo na conta Quotex — não suportado pelo bot.
+            # Orientar o usuário a desativar essa opção.
+            logger.warning(
+                "PIN solicitado para user %s — orientando a desativar PIN na Quotex.",
+                uid,
+            )
+            auditoria.registrar(uid, "pin_solicitado_desabilitar", str(exc))
 
-
-
+            await enviar_telegram(
+                chat_id,
+                "🔐 A Quotex está solicitando autenticação por PIN.\n\n"
+                "⚠️ Para que o login automático funcione corretamente, "
+                "você precisa DESABILITAR o PIN de verificação na sua conta Quotex:\n\n"
+                "1️⃣ Acesse quotex.io e faça login manualmente\n"
+                "2️⃣ Vá em Configurações → Segurança\n"
+                "3️⃣ Desative a opção de verificação por PIN/e-mail\n\n"
+                "Após desativar, use /iniciar novamente.",
+            )
+            return False, client
 
         except Exception as exc:
-
             logger.exception(
-                "Erro inesperado na conexão "
-                "(user %s): %s",
-                uid,
-                exc
+                "Erro inesperado na conexão (user %s): %s", uid, exc,
             )
-
-
-            auditoria.registrar(
-                uid,
-                "erro_conexao",
-                str(exc)
-            )
-
-
-
+            auditoria.registrar(uid, "erro_conexao", str(exc))
             await enviar_telegram(
                 chat_id,
-                f"❌ Erro inesperado: {exc}"
+                f"❌ Erro inesperado ao conectar: {exc}",
             )
+            return False, client
 
-
-            return False
-
-
-
-
-
+    # Esgotou as tentativas
     await enviar_telegram(
         chat_id,
-        "❌ Não foi possível conectar "
-        "após várias tentativas.\n"
-        "Tente novamente em alguns minutos."
+        "❌ Não foi possível conectar após várias tentativas.\n"
+        "Verifique e-mail/senha em /ajustaconfig e tente novamente em alguns minutos.",
     )
+    auditoria.registrar(uid, "conexao_esgotada")
+    return False, client
 
 
-    auditoria.registrar(
-        uid,
-        "conexao_esgotada"
-    )
-
-
-    return False
-
+# ---------------------------------------------------------------------------
+# Busca de velas
+# ---------------------------------------------------------------------------
 
 async def _buscar_velas(client: Quotex, simbolo: str, period_s: int, qtd: int = 50):
     """Busca candles históricas para o símbolo/timeframe solicitado."""
@@ -655,11 +536,9 @@ async def _buscar_velas(client: Quotex, simbolo: str, period_s: int, qtd: int = 
         return []
 
 
-def _session_dir(user_id: str) -> str:
-    path = os.path.join("sessions", user_id)
-    os.makedirs(path, exist_ok=True)
-    return path
-
+# ---------------------------------------------------------------------------
+# Loop de operações (manual e automático compartilham este mesmo loop)
+# ---------------------------------------------------------------------------
 
 async def _loop_operacoes(
     uid: str,
@@ -678,25 +557,13 @@ async def _loop_operacoes(
                         automático para encerrar às 10:30).
     """
     # --- Montagem do cliente ---
-    client = Quotex(
-        email=config["emailQuotex"],
-        password=config["senhaQuotex"],
-        root_path=_session_dir(uid),
-        lang="pt",
-    )
-    client.pin_code = None
-    client.email_imap = config.get("email_imap") or None
-    client.email_imap_password = config.get("email_imap_password") or None
-
+    client = _criar_novo_cliente(uid, config)
     _CLIENTES[uid] = client
     EXECUTANDO[uid] = True
 
-    modo = "REAL" if str(config.get("tipo", "demo")).lower() == "real" else "PRACTICE"
-    client.set_account_mode(modo)
-
     await enviar_telegram(chat_id, "⏳ Conectando à Quotex...")
 
-    ok = await _conectar_com_pin(uid, client, config, chat_id)
+    ok, client = await _conectar(uid, client, config, chat_id)
     if not ok:
         EXECUTANDO[uid] = False
         _CLIENTES.pop(uid, None)
@@ -770,10 +637,7 @@ async def _loop_operacoes(
             await asyncio.sleep(20)
             continue
 
-        # Mensagem de entrada
-        await enviar_telegram(chat_id, _msg_entrada(simbolo, direcao, minutos))
-
-        # Abertura de operação
+        # Abertura de operação ANTES de enviar mensagem ao Telegram
         try:
             status, buy_data = await client.buy(valor_atual, simbolo, direcao, tempo_s)
         except Exception as exc:
@@ -782,9 +646,12 @@ async def _loop_operacoes(
             continue
 
         if not status:
-            await enviar_telegram(chat_id, "⚠️ Falha ao abrir operação. Aguardando próximo sinal...")
+            logger.warning("Falha ao abrir operação (user %s) — sinal ignorado.", uid)
             await asyncio.sleep(5)
             continue
+
+        # Operação aberta com sucesso → agora avisa o Telegram
+        await enviar_telegram(chat_id, _msg_entrada(simbolo, direcao, minutos))
 
         # ID da operação para verificar resultado
         op_id = None
