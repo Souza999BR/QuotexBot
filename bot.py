@@ -1,4 +1,5 @@
 # === bot.py ===
+import asyncio
 import logging
 import threading
 import time
@@ -580,6 +581,7 @@ def iniciar_bot():
 
     while True:
         try:
+            asyncio.set_event_loop(asyncio.new_event_loop())
             logger.info("🤖 Iniciando bot Telegram...")
             app = (
                 ApplicationBuilder()
