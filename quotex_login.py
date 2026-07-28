@@ -49,7 +49,7 @@ from shared import USERS_DATA
 
 logger = logging.getLogger(__name__)
 
-MAX_TENTATIVAS_LOGIN = 3
+MAX_TENTATIVAS_LOGIN = 5
 
 # Janela de operações do modo automático
 AUTO_ABERTURA  = dtime(8, 0, 0)
@@ -390,20 +390,24 @@ async def _conectar(
 ) -> tuple[bool, Quotex]:
     """Tenta conectar o cliente à Quotex.
 
-    - Se o token/cookies estiverem desatualizados (LoginFailedError), apaga
-      o session.json, recria o cliente e tenta novamente (até MAX_TENTATIVAS_LOGIN).
-    - Se a Quotex exigir PIN, orienta o usuário a desativar essa opção e
-      encerra o fluxo de login.
-    - Retorna (sucesso: bool, client_atualizado: Quotex).
+    Estratégia de retry (importante para servidores em nuvem como Discloud):
+      - Nas primeiras tentativas preserva o session.json existente: apenas
+        recria o objeto cliente com backoff progressivo. Isso evita forçar
+        um novo login HTTP que pode ser bloqueado por Cloudflare em IPs de
+        datacenter.
+      - Só apaga o session.json na ÚLTIMA tentativa, como último recurso.
+      - Se a Quotex exigir PIN, orienta o usuário a desativar e encerra.
     """
     tentativas = 0
+    # Atraso base para backoff progressivo (segundos): 5, 10, 20, 30, 30...
+    _DELAYS = [5, 10, 20, 30, 30]
 
     while tentativas < MAX_TENTATIVAS_LOGIN:
 
         try:
             check, reason = await asyncio.wait_for(
                 client.connect(),
-                timeout=30,
+                timeout=60,
             )
 
             if check:
@@ -419,15 +423,19 @@ async def _conectar(
 
         except asyncio.TimeoutError:
             tentativas += 1
+            delay = _DELAYS[min(tentativas - 1, len(_DELAYS) - 1)]
             logger.warning(
-                "Timeout de conexão user %s (%d/%d)",
-                uid, tentativas, MAX_TENTATIVAS_LOGIN,
+                "Timeout de conexão user %s (%d/%d) — aguardando %ds",
+                uid, tentativas, MAX_TENTATIVAS_LOGIN, delay,
             )
             auditoria.registrar(uid, "timeout_conexao", f"tentativa={tentativas}")
 
-            # Limpa sessão e recria o cliente para a próxima tentativa
-            _limpar_session(uid)
-            _criar_session_vazia(uid)
+            eh_ultima = tentativas >= MAX_TENTATIVAS_LOGIN
+            if eh_ultima:
+                _limpar_session(uid)
+                _criar_session_vazia(uid)
+                logger.info("Última tentativa: session.json de %s limpo.", uid)
+
             try:
                 client = _criar_novo_cliente(uid, config)
                 _CLIENTES[uid] = client
@@ -436,53 +444,62 @@ async def _conectar(
 
             await enviar_telegram(
                 chat_id,
-                "⚠️ A conexão demorou demais.\n"
-                "🔄 Renovando sessão e tentando novamente...",
+                f"⚠️ A conexão demorou demais (tentativa {tentativas}/{MAX_TENTATIVAS_LOGIN}).\n"
+                f"🔄 Tentando novamente em {delay}s...",
             )
-            await asyncio.sleep(3)
+            await asyncio.sleep(delay)
             continue
 
         except LoginFailedError as exc:
-            # Token ou cookies desatualizados — apaga session.json e cria novo
+            tentativas += 1
+            delay = _DELAYS[min(tentativas - 1, len(_DELAYS) - 1)]
+            eh_ultima = tentativas >= MAX_TENTATIVAS_LOGIN
+
             logger.error(
-                "Login falhou (user %s) — sessão desatualizada: %s. "
-                "Renovando token/cookies...",
-                uid, exc,
+                "Login falhou (user %s) tentativa %d/%d: %s",
+                uid, tentativas, MAX_TENTATIVAS_LOGIN, exc,
             )
             auditoria.registrar(uid, "login_falhou_renovando_sessao", str(exc))
 
-            await enviar_telegram(
-                chat_id,
-                "🔄 Token/cookies desatualizados. Renovando sessão automaticamente...",
-            )
+            if eh_ultima:
+                # Última tentativa: limpa session.json e força novo login HTTP
+                _limpar_session(uid)
+                _criar_session_vazia(uid)
+                logger.info(
+                    "Última tentativa de login para %s — session.json limpo.", uid
+                )
+                await enviar_telegram(
+                    chat_id,
+                    "🔄 Renovando sessão completa e fazendo última tentativa...",
+                )
+            else:
+                # Tentativas iniciais: preserva cookies existentes para evitar
+                # novo login HTTP (que pode ser bloqueado por Cloudflare em
+                # servidores de datacenter). Apenas recria o objeto cliente.
+                await enviar_telegram(
+                    chat_id,
+                    f"⚠️ Falha no login (tentativa {tentativas}/{MAX_TENTATIVAS_LOGIN}).\n"
+                    f"🔄 Tentando reconectar em {delay}s...",
+                )
 
-            # 1. Remove session.json deste usuário
-            _limpar_session(uid)
-            # 2. Cria session.json vazio para forçar novo login
-            _criar_session_vazia(uid)
-            # 3. Recria o cliente com sessão zerada
             try:
                 client = _criar_novo_cliente(uid, config)
                 _CLIENTES[uid] = client
             except Exception as recreate_exc:
                 logger.exception(
-                    "Erro ao recriar cliente após LoginFailedError (user %s): %s",
-                    uid, recreate_exc,
+                    "Erro ao recriar cliente (user %s): %s", uid, recreate_exc,
                 )
                 await enviar_telegram(
                     chat_id,
-                    f"❌ Erro ao renovar sessão: {recreate_exc}\n"
+                    f"❌ Erro ao recriar cliente: {recreate_exc}\n"
                     "Verifique e-mail/senha em /ajustaconfig.",
                 )
                 return False, client
 
-            tentativas += 1
-            await asyncio.sleep(3)
+            await asyncio.sleep(delay)
             continue
 
         except PinRequiredError as exc:
-            # PIN de login ativo na conta Quotex — não suportado pelo bot.
-            # Orientar o usuário a desativar essa opção.
             logger.warning(
                 "PIN solicitado para user %s — orientando a desativar PIN na Quotex.",
                 uid,
@@ -512,11 +529,14 @@ async def _conectar(
             )
             return False, client
 
-    # Esgotou as tentativas
+    # Esgotou todas as tentativas
     await enviar_telegram(
         chat_id,
-        "❌ Não foi possível conectar após várias tentativas.\n"
-        "Verifique e-mail/senha em /ajustaconfig e tente novamente em alguns minutos.",
+        "❌ Não foi possível conectar após várias tentativas.\n\n"
+        "Possíveis causas:\n"
+        "• E-mail ou senha incorretos → /ajustaconfig\n"
+        "• Servidor bloqueado pela Quotex (tente novamente em alguns minutos)\n"
+        "• PIN ativo na conta → desative em Configurações → Segurança no site",
     )
     auditoria.registrar(uid, "conexao_esgotada")
     return False, client

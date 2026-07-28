@@ -13,7 +13,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-CONFIANCA_MINIMA_PADRAO = 50.0
+CONFIANCA_MINIMA_PADRAO = 75.0
 MEDIA_RAPIDA = 9
 MEDIA_LENTA = 21
 RSI_PERIODOS = 14
